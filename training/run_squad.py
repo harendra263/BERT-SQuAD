@@ -89,9 +89,24 @@ def train(args, train_dataset, model, tokenizer):
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ['bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
-        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
+        {
+            'params': [
+                p
+                for n, p in model.named_parameters()
+                if all(nd not in n for nd in no_decay)
+            ],
+            'weight_decay': args.weight_decay,
+        },
+        {
+            'params': [
+                p
+                for n, p in model.named_parameters()
+                if any(nd in n for nd in no_decay)
+            ],
+            'weight_decay': 0.0,
+        },
+    ]
+
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
     if args.fp16:
@@ -137,8 +152,8 @@ def train(args, train_dataset, model, tokenizer):
                       'start_positions': batch[3], 
                       'end_positions':   batch[4]}
             if args.model_type in ['xlnet', 'xlm']:
-                inputs.update({'cls_index': batch[5],
-                               'p_mask':    batch[6]})
+                inputs |= {'cls_index': batch[5], 'p_mask': batch[6]}
+
             outputs = model(**inputs)
             loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
 
@@ -167,14 +182,14 @@ def train(args, train_dataset, model, tokenizer):
                     if args.local_rank == -1 and args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
                         results = evaluate(args, model, tokenizer)
                         for key, value in results.items():
-                            tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
+                            tb_writer.add_scalar(f'eval_{key}', value, global_step)
                     tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
                     tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
                     logging_loss = tr_loss
 
                 if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
                     # Save model checkpoint
-                    output_dir = os.path.join(args.output_dir, 'checkpoint-{}'.format(global_step))
+                    output_dir = os.path.join(args.output_dir, f'checkpoint-{global_step}')
                     if not os.path.exists(output_dir):
                         os.makedirs(output_dir)
                     model_to_save = model.module if hasattr(model, 'module') else model  # Take care of distributed/parallel training
@@ -207,7 +222,7 @@ def evaluate(args, model, tokenizer, prefix=""):
     eval_dataloader = DataLoader(dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
     # Eval!
-    logger.info("***** Running evaluation {} *****".format(prefix))
+    logger.info(f"***** Running evaluation {prefix} *****")
     logger.info("  Num examples = %d", len(dataset))
     logger.info("  Batch size = %d", args.eval_batch_size)
     all_results = []
@@ -221,8 +236,8 @@ def evaluate(args, model, tokenizer, prefix=""):
                       }
             example_indices = batch[3]
             if args.model_type in ['xlnet', 'xlm']:
-                inputs.update({'cls_index': batch[4],
-                               'p_mask':    batch[5]})
+                inputs |= {'cls_index': batch[4], 'p_mask': batch[5]}
+
             outputs = model(**inputs)
 
         for i, example_index in enumerate(example_indices):
@@ -243,10 +258,19 @@ def evaluate(args, model, tokenizer, prefix=""):
             all_results.append(result)
 
     # Compute predictions
-    output_prediction_file = os.path.join(args.output_dir, "predictions_{}.json".format(prefix))
-    output_nbest_file = os.path.join(args.output_dir, "nbest_predictions_{}.json".format(prefix))
+    output_prediction_file = os.path.join(
+        args.output_dir, f"predictions_{prefix}.json"
+    )
+
+    output_nbest_file = os.path.join(
+        args.output_dir, f"nbest_predictions_{prefix}.json"
+    )
+
     if args.version_2_with_negative:
-        output_null_log_odds_file = os.path.join(args.output_dir, "null_odds_{}.json".format(prefix))
+        output_null_log_odds_file = os.path.join(
+            args.output_dir, f"null_odds_{prefix}.json"
+        )
+
     else:
         output_null_log_odds_file = None
 
@@ -267,17 +291,17 @@ def evaluate(args, model, tokenizer, prefix=""):
     evaluate_options = EVAL_OPTS(data_file=args.predict_file,
                                  pred_file=output_prediction_file,
                                  na_prob_file=output_null_log_odds_file)
-    results = evaluate_on_squad(evaluate_options)
-    return results
+    return evaluate_on_squad(evaluate_options)
 
 
 def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False):
     # Load data features from cache or dataset file
     input_file = args.predict_file if evaluate else args.train_file
-    cached_features_file = os.path.join(os.path.dirname(input_file), 'cached_{}_{}_{}'.format(
-        'dev' if evaluate else 'train',
-        list(filter(None, args.model_name_or_path.split('/'))).pop(),
-        str(args.max_seq_length)))
+    cached_features_file = os.path.join(
+        os.path.dirname(input_file),
+        f"cached_{'dev' if evaluate else 'train'}_{list(filter(None, args.model_name_or_path.split('/'))).pop()}_{str(args.max_seq_length)}",
+    )
+
     if os.path.exists(cached_features_file) and not args.overwrite_cache and not output_examples:
         logger.info("Loading features from cached file %s", cached_features_file)
         features = torch.load(cached_features_file)
@@ -313,9 +337,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
                                 all_start_positions, all_end_positions,
                                 all_cls_index, all_p_mask)
 
-    if output_examples:
-        return dataset, examples, features
-    return dataset
+    return (dataset, examples, features) if output_examples else dataset
 
 
 def main():
